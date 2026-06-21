@@ -1,22 +1,46 @@
+function arrayBufferToBase64(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'download' && request.url) {
-    
-    // Determine file extension based on the URL content
-    const isVideo = request.url.includes('.mp4') || request.url.includes('video');
-    const extension = isVideo ? '.mp4' : '.jpg';
 
-    // Use the custom filename sent from content.js, or fallback to a timestamp
-    let finalFilename = request.filename ? request.filename : `ig_download_${Date.now()}`;
-    
-    // Ensure the extension is attached
-    if (!finalFilename.endsWith(extension)) {
-        finalFilename += extension;
+    const isVideo = request.filename.endsWith('.mp4');
+
+    // Videos bypass the Base64 proxy completely to prevent RAM crashes
+    if (isVideo) {
+        chrome.downloads.download({
+            url: request.url,
+            filename: request.filename
+        });
+        return;
     }
 
-    // Trigger Chrome's native download API with the new name
-    chrome.downloads.download({
-      url: request.url,
-      filename: finalFilename
-    });
+    // Image Base64 Proxy Backup
+    fetch(request.url)
+      .then(response => {
+        if (!response.ok) throw new Error('Network response was not ok');
+        const contentType = response.headers.get('content-type') || 'application/octet-stream';
+        return response.arrayBuffer().then(buffer => ({ buffer, contentType }));
+      })
+      .then(({ buffer, contentType }) => {
+        const base64 = arrayBufferToBase64(buffer);
+        const dataUrl = `data:${contentType};base64,${base64}`;
+
+        chrome.downloads.download({
+          url: dataUrl,
+          filename: request.filename
+        });
+      })
+      .catch(error => {
+        console.error("Insta Downloader - Proxy failed:", error);
+        chrome.downloads.download({ url: request.url, filename: request.filename });
+      });
   }
 });
