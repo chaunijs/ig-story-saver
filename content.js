@@ -18,19 +18,44 @@ const getFormattedDate = () => {
   return `${mo}_${da}_${yr}_${hr}_${mi}_${se}_${ampm}`;
 };
 
-const triggerDownload = (url, filename) => {
+const triggerDownload = async (url, filename) => {
   if (!url) {
     alert('Could not locate media URL.');
     return;
   }
-  
-  // Verify the extension is still connected before messaging
-  if (chrome.runtime && chrome.runtime.id) {
-    chrome.runtime.sendMessage({ action: 'download', url: url, filename: filename });
-  } else {
-    // If context is gone, notify user to refresh
-    alert("Extension connection lost. Please refresh the page to continue.");
-    window.location.reload(); 
+
+  try {
+    // 1. Fetch the file directly within the page context to inherit Meta's security headers
+    const response = await fetch(url);
+    const blob = await response.blob();
+    
+    // 2. Convert the raw data into a local blob URL
+    const blobUrl = URL.createObjectURL(blob);
+
+    // 3. Create a temporary invisible link and click it to force the download
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    // Ensure filename has the correct extension based on the original URL
+    const ext = url.includes('.mp4') || url.includes('video') ? '.mp4' : '.jpg';
+    a.download = filename.endsWith(ext) ? filename : filename + ext;
+    
+    document.body.appendChild(a);
+    a.click();
+    
+    // 4. Clean up the DOM and memory
+    document.body.removeChild(a);
+    URL.revokeObjectURL(blobUrl);
+    
+  } catch (error) {
+    console.warn("Insta Downloader: Native fetch blocked. Falling back to background script.", error);
+    
+    // Fallback: If fetch is blocked, try the background script method
+    try {
+      chrome.runtime.sendMessage({ action: 'download', url: url, filename: filename });
+    } catch (e) {
+      alert("Extension connection lost. Please refresh the page to continue.");
+      window.location.reload(); 
+    }
   }
 };
 

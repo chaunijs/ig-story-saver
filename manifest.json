@@ -14,7 +14,9 @@
     "downloads"
   ],
   "host_permissions": [
-    "*://*.instagram.com/*"
+    "*://*.instagram.com/*",
+    "*://*.cdninstagram.com/*",
+    "*://*.fbcdn.net/*"
   ],
   "background": {
     "service_worker": "background.js"
