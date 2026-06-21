@@ -1,16 +1,22 @@
-// Listen for messages from content.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'download' && request.url) {
     
-    // Determine a generic filename based on the URL string
-    const isVideo = request.url.includes('.mp4');
+    // Determine file extension based on the URL content
+    const isVideo = request.url.includes('.mp4') || request.url.includes('video');
     const extension = isVideo ? '.mp4' : '.jpg';
-    const filename = `ig_download_${Date.now()}${extension}`;
 
-    // Trigger Chrome's native download API
+    // Use the custom filename sent from content.js, or fallback to a timestamp
+    let finalFilename = request.filename ? request.filename : `ig_download_${Date.now()}`;
+    
+    // Ensure the extension is attached
+    if (!finalFilename.endsWith(extension)) {
+        finalFilename += extension;
+    }
+
+    // Trigger Chrome's native download API with the new name
     chrome.downloads.download({
       url: request.url,
-      filename: filename
+      filename: finalFilename
     });
   }
 });
