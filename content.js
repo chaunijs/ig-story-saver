@@ -1,5 +1,6 @@
-console.log("Insta Downloader: API-Scraping Architecture Loaded (Single Story Fix)!");
+console.log("Insta Downloader: API Architecture + Download All + Edge UI Loaded!");
 
+// --- BRINGING BACK YOUR DATE FORMATTER ---
 const getFormattedDate = () => {
   const d = new Date();
   const mo = d.getMonth() + 1; const da = d.getDate(); const yr = d.getFullYear();
@@ -10,9 +11,10 @@ const getFormattedDate = () => {
   return `${mo}_${da}_${yr}_${hr}_${mi}_${se}_${ampm}`;
 };
 
-const triggerDownload = async (url, filename, btn) => {
+const triggerDownload = async (url, filename, btn, originalTextOverride) => {
   if (!url) { alert('Could not locate media URL.'); return; }
-  const originalText = btn ? btn.innerText : '';
+  
+  const originalText = btn ? (originalTextOverride || btn.innerText) : '';
   
   if (btn) {
      btn.innerText = 'Downloading...';
@@ -36,49 +38,43 @@ const triggerDownload = async (url, filename, btn) => {
     chrome.runtime.sendMessage({ action: 'download', url: url, filename: filename });
   } finally {
     if (btn) {
-       btn.innerText = originalText || 'Download';
+       btn.innerText = originalText;
        btn.style.backgroundColor = '#1ed760';
        btn.disabled = false;
     }
   }
 };
 
-// --- THE SECRET SAUCE: INSTAGRAM API SCRAPER ---
-const fetchStoryFromAPI = async (username, storyId) => {
+// --- API SCRAPER (For 24h Stories) ---
+const fetchStoryFromAPI = async (username, storyId, returnAll = false) => {
   try {
     const IG_APP_ID = '936619743392459'; 
 
-    // 1. Convert Username to internal User ID
     const profileRes = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`, {
       headers: { 'X-IG-App-ID': IG_APP_ID }
     });
     const profileData = await profileRes.json();
     const userId = profileData.data.user.id;
 
-    // 2. Fetch the raw story JSON data for this user
     const reelsRes = await fetch(`https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${userId}`, {
       headers: { 'X-IG-App-ID': IG_APP_ID }
     });
     const reelsData = await reelsRes.json();
     const stories = reelsData.reels[userId].items;
 
-    // 3. Find the exact story from the URL, or default to the FIRST story if no ID is present!
-    let currentStory;
-    if (storyId) {
-        currentStory = stories.find(s => s.pk === storyId || s.id.includes(storyId));
-    } else {
-        currentStory = stories[0]; // The "Single Story" fallback
+    if (returnAll) {
+        return stories.map(s => {
+            const isVideo = s.media_type === 2;
+            const rawUrl = isVideo ? s.video_versions[0].url : s.image_versions2.candidates[0].url;
+            return { url: rawUrl, isVideo: isVideo, resolvedId: s.pk };
+        });
     }
 
+    let currentStory = storyId ? stories.find(s => s.pk === storyId || s.id.includes(storyId)) : stories[0];
     if (!currentStory) throw new Error("Story not found in API.");
 
-    // 4. Extract the highest quality raw CDN link directly!
     const isVideo = currentStory.media_type === 2; 
-    let rawUrl = isVideo 
-        ? currentStory.video_versions[0].url 
-        : currentStory.image_versions2.candidates[0].url; 
-
-    // Return the resolved ID as well so we can name the file correctly
+    let rawUrl = isVideo ? currentStory.video_versions[0].url : currentStory.image_versions2.candidates[0].url; 
     return { url: rawUrl, isVideo: isVideo, resolvedId: currentStory.pk };
 
   } catch (error) {
@@ -87,53 +83,153 @@ const fetchStoryFromAPI = async (username, storyId) => {
   }
 };
 
+// --- DOM SCRAPER (Fallback for Highlights) ---
+const extractMediaFromDOM = () => {
+    const video = document.querySelector('video');
+    if (video && video.src && !video.src.startsWith('blob')) return { url: video.src, isVideo: true };
+    
+    const imgs = Array.from(document.querySelectorAll('img[srcset]')).filter(img => img.src.includes('scontent'));
+    if (imgs.length > 0) {
+        return { url: imgs[imgs.length - 1].src, isVideo: false };
+    }
+    return null;
+};
+
+// --- EXTRACT TIME PASSED (Broader Search) ---
+const getStoryTimeSuffix = () => {
+    // Look for ANY <time> tag on the screen instead of just in the header
+    const timeElement = document.querySelector('time');
+    if (timeElement && timeElement.textContent) {
+        return `(-${timeElement.textContent.trim().replace(/\s+/g, '-')})`;
+    }
+    return '';
+};
+
 // --- STORY UI LOGIC ---
 const setupStoryButton = () => {
-  let storyBtn = document.getElementById('global-story-dl-btn');
-  if (!storyBtn) {
-    storyBtn = document.createElement('button');
-    storyBtn.id = 'global-story-dl-btn';
-    storyBtn.innerText = 'Download Story';
-    Object.assign(storyBtn.style, {
-      position: 'fixed', top: '20px', right: '80px', zIndex: '999999',
-      backgroundColor: '#1ed760', color: '#fff', border: 'none',
-      padding: '10px 15px', borderRadius: '8px', cursor: 'pointer',
-      fontWeight: 'bold', display: 'none', boxShadow: '0 4px 6px rgba(0,0,0,0.3)'
+  let container = document.getElementById('ig-story-dl-container');
+  
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'ig-story-dl-container';
+    Object.assign(container.style, {
+      position: 'fixed',
+      top: '30px', 
+      left: 'calc(50% + 250px)', 
+      zIndex: '999999',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px'
     });
 
-    storyBtn.addEventListener('click', async (e) => {
-      e.preventDefault(); e.stopPropagation();
+    const btnStyle = {
+      backgroundColor: '#1ed760', color: '#fff', border: 'none',
+      padding: '10px 15px', borderRadius: '8px', cursor: 'pointer',
+      fontWeight: 'bold', boxShadow: '0 4px 6px rgba(0,0,0,0.3)',
+      transition: 'background-color 0.2s', whiteSpace: 'nowrap'
+    };
 
+    const btnCurrent = document.createElement('button');
+    btnCurrent.innerText = 'Download Current';
+    Object.assign(btnCurrent.style, btnStyle);
+
+    const btnAll = document.createElement('button');
+    btnAll.innerText = 'Download All';
+    Object.assign(btnAll.style, btnStyle);
+
+    container.appendChild(btnCurrent);
+    container.appendChild(btnAll);
+    document.body.appendChild(container);
+
+    // --- LOGIC FOR SINGLE DOWNLOAD ---
+    btnCurrent.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
       const urlParts = window.location.pathname.split('/').filter(Boolean);
+      if (urlParts[0] !== 'stories' || urlParts.length < 2) return;
       
-      // Update: Only require 2 parts (stories + username). ID is now optional.
-      if (urlParts[0] !== 'stories' || urlParts.length < 2) {
-          alert('Could not detect username from URL.');
-          return;
+      let username = urlParts[1];
+      let storyId = urlParts.length >= 3 ? urlParts[2] : null; 
+      let isHighlight = username === 'highlights';
+
+      if (isHighlight) {
+          const userLink = document.querySelector('header a');
+          username = userLink ? userLink.textContent.trim() : 'highlight';
       }
 
-      const username = urlParts[1];
-      const storyId = urlParts.length >= 3 ? urlParts[2] : null; 
+      btnCurrent.innerText = 'Fetching...'; 
+      let mediaData = null;
 
-      storyBtn.innerText = 'Fetching API...'; 
-
-      const mediaData = await fetchStoryFromAPI(username, storyId);
+      if (!isHighlight) {
+          mediaData = await fetchStoryFromAPI(username, storyId, false);
+      }
 
       if (!mediaData || !mediaData.url) {
-         alert('API extraction failed. Instagram may have restricted the request.');
-         storyBtn.innerText = 'Download Story';
+          mediaData = extractMediaFromDOM();
+          if (mediaData) mediaData.resolvedId = storyId || Date.now().toString();
+      }
+
+      if (!mediaData || !mediaData.url) {
+         alert('Extraction failed. Could not find media on screen or via API.');
+         btnCurrent.innerText = 'Download Current';
          return;
       }
 
-      // Use the ID we got back from the API to name the file
       const finalStoryId = mediaData.resolvedId || storyId || Date.now().toString();
-      const filename = `${username}_story_${getFormattedDate()}_${finalStoryId}${mediaData.isVideo ? '.mp4' : '.jpg'}`;
+      const timePassed = getStoryTimeSuffix();
+      const currentDate = getFormattedDate();
       
-      triggerDownload(mediaData.url, filename, storyBtn);
+      // Filename will now include both the "(-6h)" AND the current computer date
+      const filename = `${username}_story${timePassed}_${currentDate}_${finalStoryId}${mediaData.isVideo ? '.mp4' : '.jpg'}`;
+      
+      triggerDownload(mediaData.url, filename, btnCurrent, 'Download Current');
     });
-    document.body.appendChild(storyBtn);
+
+    // --- LOGIC FOR DOWNLOAD ALL ---
+    btnAll.addEventListener('click', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const urlParts = window.location.pathname.split('/').filter(Boolean);
+        if (urlParts[0] !== 'stories' || urlParts.length < 2) return;
+        
+        let username = urlParts[1];
+        if (username === 'highlights') {
+            alert("'Download All' relies on the Instagram API and only works for active 24-hour stories. Please use 'Download Current' for highlights.");
+            return;
+        }
+        
+        btnAll.disabled = true;
+        btnAll.style.backgroundColor = '#fbbc05';
+
+        try {
+            btnAll.innerText = 'Fetching Array...';
+            const allMedia = await fetchStoryFromAPI(username, null, true);
+
+            if (!allMedia || allMedia.length === 0) {
+                alert("No stories found or API restricted.");
+                return;
+            }
+
+            for (let i = 0; i < allMedia.length; i++) {
+                const media = allMedia[i];
+                btnAll.innerText = `Saving (${i + 1}/${allMedia.length})`;
+                
+                const currentDate = getFormattedDate();
+                const filename = `${username}_story_${currentDate}_${media.resolvedId}${media.isVideo ? '.mp4' : '.jpg'}`;
+                
+                await triggerDownload(media.url, filename, null, null);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        } catch (err) {
+            console.error(err);
+            alert("An error occurred while downloading all stories.");
+        } finally {
+            btnAll.innerText = 'Download All';
+            btnAll.style.backgroundColor = '#1ed760';
+            btnAll.disabled = false;
+        }
+    });
   }
-  storyBtn.style.display = window.location.href.includes('/stories/') ? 'block' : 'none';
+  
+  container.style.display = window.location.href.includes('/stories/') ? 'flex' : 'none';
 };
 
 setInterval(() => setupStoryButton(), 1500);
