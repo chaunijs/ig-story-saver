@@ -1,14 +1,13 @@
-console.log("Insta Downloader: API Architecture + Download All + Edge UI Loaded!");
+console.log("Insta Downloader: API Architecture + Proximity Targeter + Clean Filenames Loaded!");
 
-// --- BRINGING BACK YOUR DATE FORMATTER ---
 const getFormattedDate = () => {
+  // Returns only the clean date component (MM_DD_YYYY) with no time stamps
   const d = new Date();
-  const mo = d.getMonth() + 1; const da = d.getDate(); const yr = d.getFullYear();
-  let hr = d.getHours(); const mi = d.getMinutes().toString().padStart(2, '0');
-  const se = d.getSeconds().toString().padStart(2, '0');
-  const ampm = hr >= 12 ? 'PM' : 'AM';
-  hr = hr % 12; hr = hr ? hr : 12;
-  return `${mo}_${da}_${yr}_${hr}_${mi}_${se}_${ampm}`;
+  const mo = d.getMonth() + 1;
+  const da = d.getDate();
+  const yr = d.getFullYear();
+  
+  return `${mo}_${da}_${yr}`;
 };
 
 const triggerDownload = async (url, filename, btn, originalTextOverride) => {
@@ -45,22 +44,35 @@ const triggerDownload = async (url, filename, btn, originalTextOverride) => {
   }
 };
 
-// --- API SCRAPER (For 24h Stories) ---
-const fetchStoryFromAPI = async (username, storyId, returnAll = false) => {
+// --- API SCRAPER (Precision targeting + First Story Safeguard) ---
+const fetchStoryFromAPI = async (username, storyOrHighlightId, isHighlight, returnAll = false) => {
   try {
     const IG_APP_ID = '936619743392459'; 
+    let reelsUrl = '';
+    let objectKey = '';
 
-    const profileRes = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`, {
-      headers: { 'X-IG-App-ID': IG_APP_ID }
-    });
-    const profileData = await profileRes.json();
-    const userId = profileData.data.user.id;
+    if (isHighlight) {
+        reelsUrl = `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=highlight:${storyOrHighlightId}`;
+        objectKey = `highlight:${storyOrHighlightId}`;
+    } else {
+        const profileRes = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`, {
+          headers: { 'X-IG-App-ID': IG_APP_ID }
+        });
+        const profileData = await profileRes.json();
+        const userId = profileData.data.user.id;
 
-    const reelsRes = await fetch(`https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${userId}`, {
-      headers: { 'X-IG-App-ID': IG_APP_ID }
-    });
+        reelsUrl = `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${userId}`;
+        objectKey = userId.toString();
+    }
+
+    const reelsRes = await fetch(reelsUrl, { headers: { 'X-IG-App-ID': IG_APP_ID } });
     const reelsData = await reelsRes.json();
-    const stories = reelsData.reels[userId].items;
+    
+    if (!reelsData.reels || !reelsData.reels[objectKey]) {
+        throw new Error("Collection not found in API.");
+    }
+    
+    const stories = reelsData.reels[objectKey].items;
 
     if (returnAll) {
         return stories.map(s => {
@@ -70,7 +82,16 @@ const fetchStoryFromAPI = async (username, storyId, returnAll = false) => {
         });
     }
 
-    let currentStory = storyId ? stories.find(s => s.pk === storyId || s.id.includes(storyId)) : stories[0];
+    let currentStory = null;
+    
+    if (!isHighlight && storyOrHighlightId) {
+        // Target specific story index if specified in the URL string
+        currentStory = stories.find(s => s.pk.toString() === storyOrHighlightId.toString() || s.id.includes(storyOrHighlightId.toString()));
+    } else {
+        // FIX: If no ID is present in the URL (normal for the 1st story), default to the first index cleanly
+        currentStory = stories[0];
+    }
+
     if (!currentStory) throw new Error("Story not found in API.");
 
     const isVideo = currentStory.media_type === 2; 
@@ -78,31 +99,51 @@ const fetchStoryFromAPI = async (username, storyId, returnAll = false) => {
     return { url: rawUrl, isVideo: isVideo, resolvedId: currentStory.pk };
 
   } catch (error) {
-    console.error("API Fetch Error:", error);
+    console.log("API Fetch Note:", error.message);
     return null;
   }
 };
 
-// --- DOM SCRAPER (Fallback for Highlights) ---
+// --- DOM SCRAPER (Proximity Center Targeter) ---
 const extractMediaFromDOM = () => {
-    const video = document.querySelector('video');
-    if (video && video.src && !video.src.startsWith('blob')) return { url: video.src, isVideo: true };
+    const centerX = window.innerWidth / 2;
+    const mediaElements = Array.from(document.querySelectorAll('video, img'));
     
-    const imgs = Array.from(document.querySelectorAll('img[srcset]')).filter(img => img.src.includes('scontent'));
-    if (imgs.length > 0) {
-        return { url: imgs[imgs.length - 1].src, isVideo: false };
+    let closestElement = null;
+    let minDistance = Infinity;
+    let bestUrl = '';
+    let isVideo = false;
+    
+    mediaElements.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        
+        if (rect.width > 200 && rect.height > 200 && !el.src?.includes('profile_pic')) {
+            let url = el.src || el.currentSrc;
+            const tag = el.tagName.toLowerCase();
+            
+            if (tag === 'video' && (!url || url.startsWith('blob'))) {
+                const source = el.querySelector('source');
+                if (source) url = source.src;
+            }
+            
+            if (url && !url.startsWith('blob')) {
+                const elCenter = rect.left + (rect.width / 2);
+                const distance = Math.abs(elCenter - centerX);
+                
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    closestElement = el;
+                    bestUrl = url;
+                    isVideo = (tag === 'video');
+                }
+            }
+        }
+    });
+    
+    if (closestElement && bestUrl) {
+        return { url: bestUrl, isVideo: isVideo };
     }
     return null;
-};
-
-// --- EXTRACT TIME PASSED (Broader Search) ---
-const getStoryTimeSuffix = () => {
-    // Look for ANY <time> tag on the screen instead of just in the header
-    const timeElement = document.querySelector('time');
-    if (timeElement && timeElement.textContent) {
-        return `(-${timeElement.textContent.trim().replace(/\s+/g, '-')})`;
-    }
-    return '';
 };
 
 // --- STORY UI LOGIC ---
@@ -160,7 +201,7 @@ const setupStoryButton = () => {
       let mediaData = null;
 
       if (!isHighlight) {
-          mediaData = await fetchStoryFromAPI(username, storyId, false);
+          mediaData = await fetchStoryFromAPI(username, storyId, false, false);
       }
 
       if (!mediaData || !mediaData.url) {
@@ -169,17 +210,15 @@ const setupStoryButton = () => {
       }
 
       if (!mediaData || !mediaData.url) {
-         alert('Extraction failed. Could not find media on screen or via API.');
+         alert('Extraction failed. Could not find active media on screen.');
          btnCurrent.innerText = 'Download Current';
          return;
       }
 
       const finalStoryId = mediaData.resolvedId || storyId || Date.now().toString();
-      const timePassed = getStoryTimeSuffix();
       const currentDate = getFormattedDate();
       
-      // Filename will now include both the "(-6h)" AND the current computer date
-      const filename = `${username}_story${timePassed}_${currentDate}_${finalStoryId}${mediaData.isVideo ? '.mp4' : '.jpg'}`;
+      const filename = `${username}_story_${currentDate}_${finalStoryId}${mediaData.isVideo ? '.mp4' : '.jpg'}`;
       
       triggerDownload(mediaData.url, filename, btnCurrent, 'Download Current');
     });
@@ -191,9 +230,12 @@ const setupStoryButton = () => {
         if (urlParts[0] !== 'stories' || urlParts.length < 2) return;
         
         let username = urlParts[1];
-        if (username === 'highlights') {
-            alert("'Download All' relies on the Instagram API and only works for active 24-hour stories. Please use 'Download Current' for highlights.");
-            return;
+        let isHighlight = username === 'highlights';
+        let storyOrHighlightId = urlParts.length >= 3 ? urlParts[2] : null;
+        
+        if (isHighlight) {
+            const userLink = document.querySelector('header a');
+            username = userLink ? userLink.textContent.trim() : 'highlight';
         }
         
         btnAll.disabled = true;
@@ -201,10 +243,10 @@ const setupStoryButton = () => {
 
         try {
             btnAll.innerText = 'Fetching Array...';
-            const allMedia = await fetchStoryFromAPI(username, null, true);
+            const allMedia = await fetchStoryFromAPI(username, storyOrHighlightId, isHighlight, true);
 
             if (!allMedia || allMedia.length === 0) {
-                alert("No stories found or API restricted.");
+                alert("No media found or API restricted.");
                 return;
             }
 
@@ -220,7 +262,7 @@ const setupStoryButton = () => {
             }
         } catch (err) {
             console.error(err);
-            alert("An error occurred while downloading all stories.");
+            alert("An error occurred while downloading stories.");
         } finally {
             btnAll.innerText = 'Download All';
             btnAll.style.backgroundColor = '#1ed760';
