@@ -45,7 +45,7 @@ const triggerDownload = async (url, filename, btn, originalTextOverride) => {
 };
 
 // --- API SCRAPER (Precision targeting + First Story Safeguard) ---
-const fetchStoryFromAPI = async (username, storyOrHighlightId, isHighlight, returnAll = false) => {
+const fetchStoryFromAPI = async (username, storyOrHighlightId, isHighlight, returnAll = false, specificHighlightItemId = null) => {
   try {
     const IG_APP_ID = '936619743392459'; 
     let reelsUrl = '';
@@ -55,11 +55,27 @@ const fetchStoryFromAPI = async (username, storyOrHighlightId, isHighlight, retu
         reelsUrl = `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=highlight:${storyOrHighlightId}`;
         objectKey = `highlight:${storyOrHighlightId}`;
     } else {
-        const profileRes = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`, {
-          headers: { 'X-IG-App-ID': IG_APP_ID }
-        });
-        const profileData = await profileRes.json();
-        const userId = profileData.data.user.id;
+        let userId = null;
+        try {
+            const profileRes = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`, {
+              headers: { 'X-IG-App-ID': IG_APP_ID }
+            });
+            if (profileRes.ok) {
+                const profileData = await profileRes.json();
+                userId = profileData.data.user.id;
+            }
+        } catch (e) {}
+        
+        if (!userId) {
+            try {
+                const pageRes = await fetch(`https://www.instagram.com/${username}/`);
+                const html = await pageRes.text();
+                const match = html.match(/"profile_id":"(\d+)"/);
+                if (match && match[1]) userId = match[1];
+            } catch (e) {}
+        }
+
+        if (!userId) throw new Error("Could not find user ID.");
 
         reelsUrl = `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${userId}`;
         objectKey = userId.toString();
@@ -84,11 +100,11 @@ const fetchStoryFromAPI = async (username, storyOrHighlightId, isHighlight, retu
 
     let currentStory = null;
     
-    if (!isHighlight && storyOrHighlightId) {
-        // Target specific story index if specified in the URL string
+    if (isHighlight && specificHighlightItemId) {
+        currentStory = stories.find(s => s.pk.toString() === specificHighlightItemId.toString() || s.id.includes(specificHighlightItemId.toString()));
+    } else if (!isHighlight && storyOrHighlightId) {
         currentStory = stories.find(s => s.pk.toString() === storyOrHighlightId.toString() || s.id.includes(storyOrHighlightId.toString()));
     } else {
-        // FIX: If no ID is present in the URL (normal for the 1st story), default to the first index cleanly
         currentStory = stories[0];
     }
 
@@ -119,11 +135,21 @@ const extractMediaFromDOM = () => {
         
         if (rect.width > 200 && rect.height > 200 && !el.src?.includes('profile_pic')) {
             let url = el.src || el.currentSrc;
+            if (!url && el.hasAttribute('srcset')) {
+                url = el.getAttribute('srcset').split(',')[0].trim().split(' ')[0];
+            }
+            
             const tag = el.tagName.toLowerCase();
+            let elIsVideo = (tag === 'video');
             
             if (tag === 'video' && (!url || url.startsWith('blob'))) {
                 const source = el.querySelector('source');
                 if (source) url = source.src;
+                
+                if (!url || url.startsWith('blob')) {
+                    url = el.poster;
+                    elIsVideo = false; // Fallback to saving the poster image
+                }
             }
             
             if (url && !url.startsWith('blob')) {
@@ -134,7 +160,7 @@ const extractMediaFromDOM = () => {
                     minDistance = distance;
                     closestElement = el;
                     bestUrl = url;
-                    isVideo = (tag === 'video');
+                    isVideo = elIsVideo;
                 }
             }
         }
@@ -191,6 +217,7 @@ const setupStoryButton = () => {
       let username = urlParts[1];
       let storyId = urlParts.length >= 3 ? urlParts[2] : null; 
       let isHighlight = username === 'highlights';
+      let specificHighlightItemId = urlParts.length >= 4 ? urlParts[3] : null;
 
       if (isHighlight) {
           const userLink = document.querySelector('header a');
@@ -200,13 +227,11 @@ const setupStoryButton = () => {
       btnCurrent.innerText = 'Fetching...'; 
       let mediaData = null;
 
-      if (!isHighlight) {
-          mediaData = await fetchStoryFromAPI(username, storyId, false, false);
-      }
+      mediaData = await fetchStoryFromAPI(username, storyId, isHighlight, false, specificHighlightItemId);
 
       if (!mediaData || !mediaData.url) {
           mediaData = extractMediaFromDOM();
-          if (mediaData) mediaData.resolvedId = storyId || Date.now().toString();
+          if (mediaData) mediaData.resolvedId = specificHighlightItemId || storyId || Date.now().toString();
       }
 
       if (!mediaData || !mediaData.url) {
