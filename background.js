@@ -8,25 +8,38 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+const sanitizeFilename = (name) => {
+  return (name || 'instagram_story')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .trim();
+};
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'download' && request.url) {
+    const filename = sanitizeFilename(request.filename);
+    const isVideo = filename.endsWith('.mp4');
 
-    const isVideo = request.filename.endsWith('.mp4');
-
-    // Videos bypass the Base64 proxy completely to prevent RAM crashes
+    // Videos download directly via Chrome downloads manager
     if (isVideo) {
-        chrome.downloads.download({
-            url: request.url,
-            filename: request.filename
-        });
-        return;
+      chrome.downloads.download({
+        url: request.url,
+        filename: filename,
+        conflictAction: 'uniquify'
+      }, (downloadId) => {
+        if (chrome.runtime.lastError) {
+          console.error("Insta Downloader download error:", chrome.runtime.lastError.message);
+        }
+      });
+      return;
     }
 
     // Image Base64 Proxy Backup
     fetch(request.url)
       .then(response => {
         if (!response.ok) throw new Error('Network response was not ok');
-        const contentType = response.headers.get('content-type') || 'application/octet-stream';
+        const contentType = response.headers.get('content-type') || 'image/jpeg';
         return response.arrayBuffer().then(buffer => ({ buffer, contentType }));
       })
       .then(({ buffer, contentType }) => {
@@ -35,12 +48,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         chrome.downloads.download({
           url: dataUrl,
-          filename: request.filename
+          filename: filename,
+          conflictAction: 'uniquify'
         });
       })
       .catch(error => {
-        console.error("Insta Downloader - Proxy failed:", error);
-        chrome.downloads.download({ url: request.url, filename: request.filename });
+        console.warn("Insta Downloader - Base64 proxy fallback to direct URL:", error);
+        chrome.downloads.download({
+          url: request.url,
+          filename: filename,
+          conflictAction: 'uniquify'
+        });
       });
   }
 });
